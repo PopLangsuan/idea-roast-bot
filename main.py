@@ -166,6 +166,9 @@ Output Format (JSON Only):
 """
 
 app = FastAPI()
+# แทรกตรงนี้ก่อน app.mount
+if not os.path.exists("static"):
+    os.makedirs("static")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 line_bot_api = LineBotApi(line_token)
 handler = WebhookHandler(line_secret)
