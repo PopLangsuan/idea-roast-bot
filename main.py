@@ -235,51 +235,59 @@ def handle_message(event):
         print(f"Error: {e}")
 
 # ---------------------------------------------------------
-# [ใหม่] ส่วนจัดการรูปภาพ (Image) สำหรับส่งประกวด!
+# [แก้ไข] ส่วนจัดการรูปภาพ (Image) + Save Notion
 # ---------------------------------------------------------
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
     reply_token = event.reply_token
+    user_id = event.source.user_id # ⚠️ ต้องมีบรรทัดนี้ ไม่งั้น save_to_notion พังครับ
+    
     try:
-        print("📸 Received Image...")
+        print(f"📸 Received Image from {user_id}...")
         
         # 1. ดึงไฟล์รูปจาก LINE Server
         message_content = line_bot_api.get_message_content(event.message.id)
         image_bytes = message_content.content
         
-        # 2. สร้าง Prompt สำหรับ Vision โดยเฉพาะ
+        # 2. ปรับ Prompt (คงเนื้อหาเดิม แต่สั่ง Output เป็น JSON เพื่อแยก Text ไปเก็บ)
         vision_prompt = """
         Role: You are "IdeaPartner", a sincere and supportive business partner (Friendly & Witty).
         Mindset: Based on Dale Carnegie + Positive Psychology (Show genuine interest, No judgment).
         
-        Task: Analyze the image and respond as a supportive friend.
+        Task: Analyze the image.
+        1. If it contains text (handwriting/docs), EXTRACT it into 'extracted_text'.
+        2. Generate a friendly 'reply' based on the scenarios below.
 
-        **Language Detection:**
+        **Language Detection for Reply:**
         - Check text inside the image.
         - If text is ENGLISH -> Respond in English (American Creator Style: "Dude", "Man").
         - If text is THAI (or no text) -> Respond in Thai (Modern Thai Friend 2024: "ว่ะ", "เนอะ", "สภาพพพ").
 
-        Scenarios:
+        Scenarios for 'reply':
         1. **Messy Room/Desk:**
            - Tease gently (Friendly roasting).
            - Suggest 1 tiny step to organize (Growth Mindset).
-           - (TH Example: "โห สภาพพพ! นึกว่าผ่านสงครามมา 😂 เคลียร์แก้วกาแฟใบนั้นก่อนมั้ยเพื่อน? จะได้มีที่วางเงินล้าน!")
-           - (EN Example: "Dude, is this a workspace or a warzone? 🤣 Just move that cup first, small steps man!")
+           - (TH: "โห สภาพพพ! นึกว่าผ่านสงครามมา 😂 เคลียร์แก้วกาแฟใบนั้นก่อนมั้ยเพื่อน?")
+           - (EN: "Dude, is this a workspace or a warzone? 🤣 Just move that cup first!")
 
         2. **Notebook/Handwriting/Bills:**
            - Analyze content briefly.
-           - Praise their discipline (Dale Carnegie: "Appreciation").
-           - (TH Example: "ลายมือสวยว่ะ! จดละเอียดขนาดนี้ อนาคตเศรษฐีชัดๆ 🚀")
-           - (EN Example: "Solid tracking, man! This kind of discipline is exactly what founders need.")
+           - Praise their discipline.
+           - (TH: "ลายมือสวยว่ะ! จดละเอียดขนาดนี้ อนาคตเศรษฐีชัดๆ 🚀")
+           - (EN: "Solid tracking, man! This kind of discipline is exactly what founders need.")
 
         3. **Other Images:**
-           - Chat about it like a supportive friend.
-           - Keep it Short & Punchy (Max 3-4 lines).
+           - Chat about it like a supportive friend. Short & Punchy.
 
-        Output: Plain text only (No JSON needed here, just the reply string).
+        **CRITICAL OUTPUT FORMAT (JSON ONLY):**
+        {
+            "reply": "Your friendly response string here",
+            "extracted_text": "All text found in the image (if any). If none, leave empty.",
+            "category": "Identify category: Business / Productivity / General / Off-topic"
+        }
         """
         
-        # 3. เตรียมข้อมูลส่ง Gemini (Text + Image Bytes)
+        # 3. เตรียมข้อมูลส่ง Gemini
         image_part = {
             "mime_type": "image/jpeg",
             "data": image_bytes
@@ -291,12 +299,41 @@ def handle_image_message(event):
             safety_settings=safety_settings
         )
         
-        ai_reply = response.text.strip()
-        print(f"🤖 AI (Vision): {ai_reply}")
+        raw_result = response.text.strip()
+        print(f"🤖 AI Raw: {raw_result[:50]}...") # Debug ดูว่า JSON ออกมาไหม
         
-        # 5. ตอบกลับ LINE
+        # 5. Clean & Parse JSON (แยกส่วนเพื่อการจัดเก็บ)
+        try:
+            cleaned_json = clean_json_string(raw_result)
+            data = json.loads(cleaned_json)
+            
+            ai_reply = data.get("reply", "รูปสวยดีนะเพื่อน! (ระบบประมวลผลคำตอบไม่ได้)")
+            extracted_text = data.get("extracted_text", "")
+            category = data.get("category", "General")
+            
+        except:
+            # Fallback: ถ้า AI ไม่ส่ง JSON ให้ตอบแบบเดิม กันระบบล่ม
+            ai_reply = raw_result
+            extracted_text = ""
+            category = "General"
+
+        # 6. ตอบกลับ LINE (User เห็นแค่นี้)
         line_bot_api.reply_message(reply_token, TextSendMessage(text=ai_reply))
+        
+        # 7. Save to Notion (ทำงานเบื้องหลัง)
+        # เงื่อนไข: ต้องมี Text ในรูป และไม่ใช่เรื่องไร้สาระ ถึงจะบันทึก
+        if extracted_text and len(extracted_text) > 2 and category != "Off-topic":
+            print(f"💾 Saving Image Text to Notion: {category}")
+            bg_thread = threading.Thread(
+                target=save_to_notion, 
+                # บันทึกโดยระบุว่ามาจาก [Image]
+                args=(f"[Image Content] {extracted_text}", ai_reply, user_id, category)
+            )
+            bg_thread.start()
         
     except Exception as e:
         print(f"Vision Error: {e}")
-        line_bot_api.reply_message(reply_token, TextSendMessage(text="โทษทีเพื่อน เน็ตไม่ดี มองไม่เห็นรูปเลย 😵‍💫"))
+        # กรณี Error ค่อยตอบ Text ธรรมดา
+        try:
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="โทษทีเพื่อน เน็ตไม่ดี มองไม่เห็นรูปเลย 😵‍💫"))
+        except: pass
