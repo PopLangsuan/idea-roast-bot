@@ -1,3 +1,5 @@
+--- START OF FILE main.py ---
+
 import os
 import sys
 import threading
@@ -13,7 +15,8 @@ import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+# 1. [แก้ไข] เพิ่ม ImageMessage ตรงนี้
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageMessage
 
 # 1. โหลด Config
 load_dotenv()
@@ -29,6 +32,7 @@ if not all([line_token, line_secret, gemini_key, notion_key, notion_db_id]):
 
 # 2. Setup Models (ใช้ Lite เพื่อความเร็วสูงสุด)
 genai.configure(api_key=gemini_key)
+# หมายเหตุ: gemini-flash-latest รองรับรูปภาพอยู่แล้ว ไม่ต้องเปลี่ยน
 chat_model = genai.GenerativeModel("gemini-flash-latest") 
 
 safety_settings = {
@@ -174,7 +178,7 @@ line_bot_api = LineBotApi(line_token)
 handler = WebhookHandler(line_secret)
 
 @app.get("/")
-async def root(): return {"status": "Active", "mode": "Speed King (1.5s Timeout)"}
+async def root(): return {"status": "Active", "mode": "Speed King (1.5s Timeout) + Vision Ready"}
 
 @app.post("/callback")
 async def callback(request: Request):
@@ -184,6 +188,9 @@ async def callback(request: Request):
     except InvalidSignatureError: raise HTTPException(status_code=400)
     return 'OK'
 
+# ---------------------------------------------------------
+# ส่วนเดิม: จัดการข้อความ (Text)
+# ---------------------------------------------------------
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_msg = event.message.text
@@ -192,7 +199,6 @@ def handle_message(event):
     
     try:
         # 1. Parallel Memory Fetch (Timeout 1.5s)
-        # ถ้านานกว่านี้ ข้ามความจำไปเลย
         memory_context = get_smart_memory_fast(user_msg, user_id)
         
         # 2. Gemini Thinking
@@ -204,7 +210,7 @@ def handle_message(event):
         )
         
         raw_reply = response.text.strip()
-        print(f"🤖 AI: {raw_reply[:30]}...") 
+        print(f"🤖 AI (Text): {raw_reply[:30]}...") 
 
         # 3. Clean JSON
         try:
@@ -229,3 +235,58 @@ def handle_message(event):
 
     except Exception as e:
         print(f"Error: {e}")
+
+# ---------------------------------------------------------
+# [ใหม่] ส่วนจัดการรูปภาพ (Image) สำหรับส่งประกวด!
+# ---------------------------------------------------------
+@handler.add(MessageEvent, message=ImageMessage)
+def handle_image_message(event):
+    reply_token = event.reply_token
+    try:
+        print("📸 Received Image...")
+        
+        # 1. ดึงไฟล์รูปจาก LINE Server
+        message_content = line_bot_api.get_message_content(event.message.id)
+        image_bytes = message_content.content
+        
+        # 2. สร้าง Prompt สำหรับ Vision โดยเฉพาะ
+        vision_prompt = """
+        Role: You are "IdeaPartner" (AI Life Coach).
+        Task: Analyze this image and respond based on context:
+        
+        Scenario A: If it's a messy room/desk:
+        - Tease them gently (friendly joke).
+        - Suggest 1 tiny step to organize (e.g., "Move that coffee cup first").
+        
+        Scenario B: If it's a notebook/handwriting/bills:
+        - Analyze the numbers or content briefly.
+        - Compliment their discipline in tracking/writing.
+        
+        Scenario C: Other images:
+        - Just chat about it like a friend.
+        
+        Tone: Friendly, Witty, Encouraging (Thai Language).
+        Output: Plain text (No JSON needed here, just the reply string).
+        """
+        
+        # 3. เตรียมข้อมูลส่ง Gemini (Text + Image Bytes)
+        image_part = {
+            "mime_type": "image/jpeg",
+            "data": image_bytes
+        }
+        
+        # 4. ยิงไปหา Gemini
+        response = chat_model.generate_content(
+            [vision_prompt, image_part],
+            safety_settings=safety_settings
+        )
+        
+        ai_reply = response.text.strip()
+        print(f"🤖 AI (Vision): {ai_reply}")
+        
+        # 5. ตอบกลับ LINE
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=ai_reply))
+        
+    except Exception as e:
+        print(f"Vision Error: {e}")
+        line_bot_api.reply_message(reply_token, TextSendMessage(text="โทษทีเพื่อน เน็ตไม่ดี มองไม่เห็นรูปเลย 😵‍💫"))
