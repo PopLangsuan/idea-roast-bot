@@ -1,5 +1,3 @@
---- START OF FILE main.py ---
-
 import os
 import sys
 import threading
